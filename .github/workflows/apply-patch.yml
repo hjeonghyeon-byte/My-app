@@ -55,12 +55,32 @@ jobs:
       - name: Apply patch
         run: |
           set -e
-          git apply --reject --whitespace=fix /tmp/patch.diff || true
+          PATCH=/tmp/patch.diff
+
+          echo "---- sniff patch type ----"
+          head -n 5 "$PATCH" || true
+
+          # 1) git 패치 형식(diff --git ...)이면 git apply 사용
+          if head -n1 "$PATCH" | grep -q '^diff --git '; then
+            echo "Using: git apply"
+            git apply --reject --whitespace=fix "$PATCH" || {
+              echo "git apply failed"; exit 1;
+            }
+          else
+            # 2) 그 외에는 표준 unified diff로 간주하고 patch 사용
+            echo "Using: patch -p0"
+            patch -p0 -i "$PATCH" || {
+              echo "patch command failed"; exit 1;
+            }
+          fi
+
           git add -A
           if git diff --cached --quiet; then
             echo "No changes staged; patch may have failed"; exit 1
           fi
+
           git commit -m "auto: apply patch from n8n (run ${{ github.run_id }})"
+
 
       - name: Run tests
         run: |
