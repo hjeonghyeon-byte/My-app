@@ -1,0 +1,74 @@
+name: Apply patch from n8n
+on:
+  workflow_dispatch:
+    inputs:
+      patch_b64:
+        description: Base64-encoded unified diff
+        required: true
+      base_branch:
+        description: Base branch to apply on
+        required: true
+        default: main
+      pr_title:
+        description: PR title
+        required: false
+        default: "Auto patch from n8n"
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  apply-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout base branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.base_branch }}
+
+      - name: Create working branch
+        run: |
+          BR="auto/patch-${{ github.run_id }}"
+          echo "BRANCH=$BR" >> $GITHUB_ENV
+          git switch -c "$BR"
+
+      - name: Write patch file
+        run: |
+          echo "${{ github.event.inputs.patch_b64 }}" | base64 -d > /tmp/patch.diff
+          echo "---- patch head ----"
+          head -n 40 /tmp/patch.diff || true
+
+      - name: Apply patch
+        run: |
+          set -e
+          git apply --reject --whitespace=fix /tmp/patch.diff || true
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes staged; patch may have failed"; exit 1
+          fi
+          git commit -m "auto: apply patch from n8n (run ${{ github.run_id }})"
+
+      - name: Run tests
+        run: |
+          if [ -x ./run_tests.sh ]; then
+            bash ./run_tests.sh
+          elif [ -f package.json ]; then
+            npm ci && npm test --silent
+          elif ls -1 *test*.py tests 2>/dev/null; then
+            python -m pip install --upgrade pip pytest && pytest -q --maxfail=1 --disable-warnings
+          else
+            echo "No tests found"; exit 0
+          fi
+
+      - name: Push branch
+        run: git push --set-upstream origin "$BRANCH"
+
+      - name: Create PR
+        uses: peter-evans/create-pull-request@v6
+        with:
+          branch: ${{ env.BRANCH }}
+          base: ${{ github.event.inputs.base_branch }}
+          title: ${{ github.event.inputs.pr_title }}
+          body: "Patch applied by n8n. Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          labels: auto-patch,n8n
