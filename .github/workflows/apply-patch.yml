@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       patch_b64:
-        description: Base64-encoded unified diff
+        description: Base64-encoded patch (git-diff or unified diff)
         required: true
       base_branch:
         description: Base branch to apply on
@@ -22,12 +22,11 @@ permissions:
 jobs:
   apply-and-test:
     runs-on: ubuntu-latest
-
     env:
       BRANCH: auto/patch-${{ github.run_id }}
 
     steps:
-      - name: Checkout base branch
+      - name: Checkout base branch (full)
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.inputs.base_branch }}
@@ -38,39 +37,32 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Create working branch
+      - name: Decode patch (trim spaces/newlines → base64 decode → normalize LF)
         run: |
           set -e
-          git switch -c "${{ env.BRANCH }}"
-          echo "Using branch: ${{ env.BRANCH }}"
-
-      - name: Write patch file
-        run: |
-          # 깨진 Base64 방지: 공백/개행 제거 후 디코드, 개행 정규화
           echo "${{ github.event.inputs.patch_b64 }}" | tr -d '\r\n ' | base64 -d > /tmp/patch.diff
+          # 줄바꿈 정규화
           dos2unix /tmp/patch.diff || true
           echo "---- patch head ----"
-          head -n 40 /tmp/patch.diff || true
+          head -n 50 /tmp/patch.diff || true
 
-      - name: Apply patch
+      - name: Apply patch (git-diff면 git apply, 아니면 patch)
         run: |
           set -e
           PATCH=/tmp/patch.diff
 
           echo "---- sniff patch type ----"
-          head -n 5 "$PATCH" || true
+          head -n 1 "$PATCH" || true
 
-          # 1) git 패치 형식(diff --git ...)이면 git apply 사용
           if head -n1 "$PATCH" | grep -q '^diff --git '; then
-            echo "Using: git apply"
-            git apply --reject --whitespace=fix "$PATCH" || {
-              echo "git apply failed"; exit 1;
-            }
+            echo "Using: git apply (with whitespace tolerance)"
+            git apply --reject --whitespace=fix "$PATCH" \
+              || git apply --reject --ignore-whitespace "$PATCH"
           else
-            # 2) 그 외에는 표준 unified diff로 간주하고 patch 사용
-            echo "Using: patch -p0"
+            echo "Using: patch -p0 (LF normalized)"
             patch -p0 -i "$PATCH" || {
-              echo "patch command failed"; exit 1;
+              echo "patch failed; trying -p1 fallback"
+              patch -p1 -i "$PATCH"
             }
           fi
 
@@ -81,8 +73,7 @@ jobs:
 
           git commit -m "auto: apply patch from n8n (run ${{ github.run_id }})"
 
-
-      - name: Run tests
+      - name: (Optional) Run tests
         run: |
           if [ -x ./run_tests.sh ]; then
             bash ./run_tests.sh
@@ -96,6 +87,7 @@ jobs:
 
       - name: Push branch
         run: |
+          git switch -c "${{ env.BRANCH }}" || git checkout "${{ env.BRANCH }}"
           git push --set-upstream origin "${{ env.BRANCH }}"
 
       - name: Create PR
@@ -104,5 +96,14 @@ jobs:
           branch: ${{ env.BRANCH }}
           base: ${{ github.event.inputs.base_branch }}
           title: ${{ github.event.inputs.pr_title }}
-          body: "Patch applied by n8n. Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+          body: |
+            Patch applied by n8n.  
+            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
           labels: auto-patch,n8n
+
+      - name: Show last commits & touched files (for quick check)
+        run: |
+          echo "---- last commits ----"
+          git log -n 3 --oneline
+          echo "---- changed files in this commit ----"
+          git show --name-status --oneline HEAD
