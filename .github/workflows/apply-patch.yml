@@ -45,9 +45,15 @@ jobs:
 
       - name: Write patch file
         run: |
-          printf "%s" "${{ github.event.inputs.patch_b64 }}" | base64 -d > /tmp/patch.diff
+      - name: Write patch file
+        run: |
+        # 붙여넣으며 섞였을 수 있는 공백/개행 제거 후 디코드
+          echo "${{ github.event.inputs.patch_b64 }}" | tr -d '\r\n ' | base64 -d > /tmp/patch.diff
+        # 윈도우 개행 들어간 경우 정규화
+          dos2unix /tmp/patch.diff || true
           echo "---- patch head ----"
-          head -n 30 /tmp/patch.diff || true
+          head -n 40 /tmp/patch.diff || true
+
 
       - name: Apply patch
         run: |
