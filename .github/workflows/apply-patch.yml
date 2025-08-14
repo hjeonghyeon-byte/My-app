@@ -22,6 +22,7 @@ permissions:
 jobs:
   apply-and-test:
     runs-on: ubuntu-latest
+
     env:
       BRANCH: auto/patch-${{ github.run_id }}
 
@@ -45,15 +46,11 @@ jobs:
 
       - name: Write patch file
         run: |
-      - name: Write patch file
-        run: |
-        # ë¶™ì—¬ë„£ìœ¼ë©° ì„ì˜€ì„ ìˆ˜ ìˆëŠ” ê³µë°±/ê°œí–‰ ì œê±° í›„ ë””ì½”ë“œ
+          # ±úÁø Base64 ¹æÁö: °ø¹é/°³Çà Á¦°Å ÈÄ µğÄÚµå, °³Çà Á¤±ÔÈ­
           echo "${{ github.event.inputs.patch_b64 }}" | tr -d '\r\n ' | base64 -d > /tmp/patch.diff
-        # ìœˆë„ìš° ê°œí–‰ ë“¤ì–´ê°„ ê²½ìš° ì •ê·œí™”
           dos2unix /tmp/patch.diff || true
           echo "---- patch head ----"
           head -n 40 /tmp/patch.diff || true
-
 
       - name: Apply patch
         run: |
