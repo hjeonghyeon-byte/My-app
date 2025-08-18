@@ -4,17 +4,16 @@ on:
   workflow_dispatch:
     inputs:
       base_branch:
-        description: Base branch
+        description: "Base branch to patch"
         required: true
-        default: main
+        default: "main"
       pr_title:
-        description: PR title
+        description: "PR title"
         required: true
-        default: Auto patch from n8n
+        default: "Auto patch from n8n"
       patch_b64:
-        description: Optional Base64 patch
-        required: false
-        default: ""
+        description: "Base64-encoded unified diff"
+        required: true
 
 permissions:
   contents: write
@@ -56,9 +55,7 @@ jobs:
       b = os.environ['PATCH_B64']
       open('patch.diff','wb').write(base64.b64decode(b))
       PY
-          # 패치 적용 (p0 → p1 순으로 시도, 공백 경고 무시)
           git apply -p0 --whitespace=nowarn patch.diff || git apply -p1 --whitespace=nowarn patch.diff
-
 
       - name: Create/Update hello.txt
         run: |
