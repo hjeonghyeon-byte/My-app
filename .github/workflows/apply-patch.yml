@@ -48,13 +48,17 @@ jobs:
 
       - name: Apply patch if provided
         if: ${{ github.event.inputs.patch_b64 != '' }}
+        env:
+          PATCH_B64: ${{ github.event.inputs.patch_b64 }}
         run: |
-          echo "${{ github.event.inputs.patch_b64 }}" | base64 -d > patch.diff
-          if git apply --ignore-whitespace --check patch.diff; then
-            git apply --ignore-whitespace patch.diff
-          else
-            echo "Patch apply failed" >> .n8n-diagnose.txt
-          fi
+          python3 - <<'PY'
+      import os, base64
+      b = os.environ['PATCH_B64']
+      open('patch.diff','wb').write(base64.b64decode(b))
+      PY
+          # 패치 적용 (p0 → p1 순으로 시도, 공백 경고 무시)
+          git apply -p0 --whitespace=nowarn patch.diff || git apply -p1 --whitespace=nowarn patch.diff
+
 
       - name: Create/Update hello.txt
         run: |
