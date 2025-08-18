@@ -75,7 +75,7 @@ jobs:
         run: |
           git push -u origin "$BRANCH"
 
-      - name: Create Pull Request (REST)
+      - name: Create Pull Request (REST, robust)
         if: env.SKIP_PR != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
@@ -88,28 +88,32 @@ jobs:
           set -e
           BODY="Automated patch from workflow run ${{ github.run_id }}."
           PAYLOAD=$(printf '{"title":"%s","head":"%s","base":"%s","body":"%s"}' "$TITLE" "$HEAD" "$BASE" "$BODY")
+
           CODE=$(curl -sS -o pr.json -w "%{http_code}" -X POST \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             -d "$PAYLOAD" \
             "https://api.github.com/repos/$REPO/pulls")
+
           echo "HTTP_CODE=$CODE"
+          cat pr.json || true
+
           if [ "$CODE" = "201" ] || [ "$CODE" = "200" ]; then
-            python - <<'PY'
-import json; print("PR_URL="+json.load(open("pr.json")).get("html_url",""))
-PY
+            python -c 'import json; print("PR_URL="+json.load(open("pr.json")).get("html_url",""))'
             exit 0
           fi
+
           if grep -qi "already exists" pr.json; then
             curl -sS -H "Authorization: Bearer $GH_TOKEN" \
               "https://api.github.com/repos/$REPO/pulls?head=$OWNER:$HEAD&state=open" > list.json
-            python - <<'PY'
-import json; lst=json.load(open("list.json")); print("EXISTING_PR_URL="+(lst[0]["html_url"] if lst else ""))
-PY
+            python -c 'import json; lst=json.load(open("list.json")); print("EXISTING_PR_URL="+(lst[0]["html_url"] if lst else ""))'
             exit 0
           fi
+
           if grep -qi "No commits between" pr.json; then
             echo "::notice:: No commits between $BASE and $HEAD"
             exit 0
           fi
-          echo "::error:: PR creation failed"; cat pr.json; exit 1
+
+          echo "::error:: PR creation failed"
+          exit 1
