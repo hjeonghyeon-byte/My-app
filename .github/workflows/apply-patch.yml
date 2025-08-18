@@ -34,7 +34,7 @@ jobs:
           git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      # ✅ 여기로 이동 (브랜치 먼저 생성)
+      # 여기로 이동 (브랜치 먼저 생성)
       - name: Create feature branch first
         run: |
           BR=auto/patch-${{ github.run_id }}
@@ -74,17 +74,30 @@ jobs:
       # (기존) Create Pull Request
 
 
-      - name: Commit changes if any
-        run: |
-          git add -A
-          if git diff --cached --quiet; then
-            echo "No changes to commit."
-            echo "::notice:: 변경 사항이 없어 PR을 만들지 않습니다."
-            echo "no changes" > .n8n-diagnose.txt
-            echo "SKIP_PR=true" >> $GITHUB_ENV
-          else
-            git commit -m "${{ github.event.inputs.pr_title }}"
-          fi
+- name: Stage & commit (force add)
+  run: |
+    echo "---- status before add ----"
+    git status --porcelain
+
+    # hello.txt를 .gitignore 여부와 무관하게 강제 포함
+    git add -f hello.txt
+    # (선택) 진단 파일이 있으면 함께 포함
+    if [ -f ".n8n-diagnose.txt" ]; then git add -f .n8n-diagnose.txt; fi
+
+    echo "---- staged diff ----"
+    git diff --cached --name-status || true
+
+    if git diff --cached --quiet; then
+      echo "No changes to commit."
+      echo "SKIP_PR=true" >> $GITHUB_ENV
+    else
+      git commit -m "${{ github.event.inputs.pr_title }}"
+      echo "===== COMMIT SUMMARY ====="
+      git log --oneline -n 1
+      echo "===== SHOW DIFF ====="
+      git show --name-status --oneline -n 1
+    fi
+
 
       - name: Push branch
         if: env.SKIP_PR != 'true'
