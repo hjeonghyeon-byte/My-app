@@ -1,61 +1,92 @@
 name: Apply Patch
+
 on:
   workflow_dispatch:
     inputs:
-      patch_b64:
-        description: 'Base64 encoded patch'
-        required: true
       base_branch:
-        description: 'Base branch to apply patch'
+        description: 'Base branch to open PR against (e.g., main)'
         required: true
+        default: 'main'
       pr_title:
         description: 'PR title'
         required: false
         default: 'Auto patch from n8n'
+      patch_b64:
+        description: 'Optional: Base64-encoded patch to apply'
+        required: false
+
+permissions:
+  contents: write
+  pull-requests: write
 
 jobs:
-  apply-patch:
+  apply-and-pr:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout base branch
+        uses: actions/checkout@v4
         with:
           ref: ${{ github.event.inputs.base_branch }}
+          fetch-depth: 0
 
-      - name: Create working branch
+      - name: Configure git
         run: |
           git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git checkout -b auto/patch-${{ github.run_id }}
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Decode and apply patch
+      # (선택) patch_b64가 넘어오면 적용
+      - name: Apply patch if provided
+        if: ${{ inputs.patch_b64 != '' }}
         run: |
-          echo "${{ github.event.inputs.patch_b64 }}" | base64 -d > patch.diff
-          dos2unix patch.diff
-          if ! git apply --check patch.diff; then
-            echo "Patch apply failed, creating diagnostic file" > .n8n-diagnose.txt
-            echo "Patch content:" >> .n8n-diagnose.txt
-            cat patch.diff >> .n8n-diagnose.txt
-            echo "Trying patch -p0" >> .n8n-diagnose.txt
-            patch -p0 < patch.diff || echo "patch -p0 failed" >> .n8n-diagnose.txt
-            echo "Trying patch -p1" >> .n8n-diagnose.txt
-            patch -p1 < patch.diff || echo "patch -p1 failed" >> .n8n-diagnose.txt
-            git add .n8n-diagnose.txt
-            git commit -m "Add diagnostic file for failed patch"
-          else
+          echo "${{ inputs.patch_b64 }}" | base64 -d > patch.diff
+          # 실패 시에도 워크플로 전체가 죽지 않도록 처리
+          if git apply --ignore-whitespace --check patch.diff; then
             git apply --ignore-whitespace patch.diff
-            git add .
+          else
+            echo "::warning:: patch.diff 적용 불가. .n8n-diagnose.txt에 로그를 남깁니다."
+            echo "Patch apply failed at $(date -u +%FT%TZ)" >> .n8n-diagnose.txt
+          fi
+
+      - name: Create/Update hello.txt
+        run: |
+          echo "hello from GitHub Actions at $(date -u +%FT%TZ)" > hello.txt
+
+      - name: Create feature branch
+        run: |
+          BR=auto/patch-${{ github.run_id }}
+          # base == BR 방지
+          if [ "${{ github.event.inputs.base_branch }}" = "$BR" ]; then
+            echo "::error:: base_branch와 작업 브랜치가 동일합니다. base_branch를 main 등으로 바꿔 실행하세요."
+            exit 1
+          fi
+          git checkout -b "$BR"
+
+      - name: Commit changes if any
+        run: |
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            echo "::notice:: 변경 사항이 없어 PR을 만들지 않습니다."
+            echo "no changes" > .n8n-diagnose.txt
+            echo "SKIP_PR=true" >> $GITHUB_ENV
+          else
             git commit -m "${{ github.event.inputs.pr_title }}"
           fi
 
-      - name: Push changes
+      - name: Push branch
+        if: env.SKIP_PR != 'true'
         run: |
-          git push origin auto/patch-${{ github.run_id }}
+          git push -u origin auto/patch-${{ github.run_id }}
 
       - name: Create Pull Request
-        uses: peter-evans/create-pull-request@v5
+        if: env.SKIP_PR != 'true'
+        uses: peter-evans/create-pull-request@v6
         with:
           commit-message: ${{ github.event.inputs.pr_title }}
           branch: auto/patch-${{ github.run_id }}
           base: ${{ github.event.inputs.base_branch }}
           title: ${{ github.event.inputs.pr_title }}
-          body: "Automated patch from n8n. Check .n8n-diagnose.txt if patch failed."
+          body: |
+            Automated patch from n8n.
+            - hello.txt generated/updated
+            - If patch was provided and failed, see .n8n-diagnose.txt
