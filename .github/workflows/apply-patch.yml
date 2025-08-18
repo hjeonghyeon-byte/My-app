@@ -82,38 +82,65 @@ jobs:
         run: |
           git push -u origin "auto/patch-${{ github.run_id }}"
 
-      - name: Create Pull Request (REST)
+      - name: Create Pull Request (REST, robust)
         if: env.SKIP_PR != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
+          OWNER: ${{ github.repository_owner }}
           HEAD: auto/patch-${{ github.run_id }}
           BASE: ${{ github.event.inputs.base_branch }}
           TITLE: ${{ github.event.inputs.pr_title }}
         run: |
+          set -e
           BODY="Automated patch from workflow run ${{ github.run_id }}."
-          JSON_PAYLOAD=$(printf '{"title":"%s","head":"%s","base":"%s","body":"%s"}' "$TITLE" "$HEAD" "$BASE" "$BODY")
+          JSON=$(printf '{"title":"%s","head":"%s","base":"%s","body":"%s"}' "$TITLE" "$HEAD" "$BASE" "$BODY")
 
-          echo "POST /repos/$REPO/pulls with head=$HEAD base=$BASE"
-          RESP=$(curl -sS -X POST \
+          # 1) PR 생성 시도
+          HTTP_CODE=$(curl -sS -o pr.json -w "%{http_code}" -X POST \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
-            -d "$JSON_PAYLOAD" \
+            -d "$JSON" \
             "https://api.github.com/repos/$REPO/pulls")
+          echo "HTTP_CODE=$HTTP_CODE"
+          echo "---- create response ----"
+          cat pr.json || true
 
-          echo "$RESP" > pr_response.json
-          PR_URL=$(python - << 'PY'
-      import json,sys
-      data=json.load(open("pr_response.json"))
-      print(data.get("html_url",""))
-      PY
-      )
-          if [ -n "$PR_URL" ] && [ "$PR_URL" != "null" ]; then
+          if [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "200" ]; then
+            PR_URL=$(python - << 'PY'
+import json
+print(json.load(open("pr.json")).get("html_url",""))
+PY
+)
             echo "✅ PR created: $PR_URL"
-          else
-            echo "⚠️  PR not created. Raw response:"
-            cat pr_response.json
-            exit 1
+            exit 0
           fi
+
+          # 2) 이미 PR 존재(422)인 경우: 기존 PR URL 조회
+          if grep -qi "already exists" pr.json; then
+            echo "ℹ️ PR already exists; searching open PR by head..."
+            curl -sS -H "Authorization: Bearer $GH_TOKEN" \
+              "https://api.github.com/repos/$REPO/pulls?head=$OWNER:$HEAD&state=open" > list.json
+            echo "---- list response ----"
+            cat list.json || true
+            PR_URL=$(python - << 'PY'
+import json,sys
+lst=json.load(open("list.json"))
+print(lst[0]["html_url"] if lst else "")
+PY
+)
+            if [ -n "$PR_URL" ]; then
+              echo "✅ Existing PR: $PR_URL"
+              exit 0
+            fi
+          fi
+
+          # 3) 커밋 차이 없음(422)일 때는 공지 후 통과
+          if grep -qi "No commits between" pr.json; then
+            echo "::notice:: No commits between $BASE and $HEAD; PR not needed."
+            exit 0
+          fi
+
+          echo "::error:: PR creation failed
 
 
