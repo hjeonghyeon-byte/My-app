@@ -10,79 +10,70 @@ on:
       pr_title:
         description: 'PR title'
         required: true
-        default: Auto patch from n8n
+        default: 'Auto patch from n8n'
       patch_b64:
-        description: 'Base64 diff'
-        required: false
-      head_branch:
-        description: 'Feature branch name'
+        description: 'Base64-encoded patch (optional)'
         required: false
         default: ''
 
-jobs:
-  run:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          ref: ${{ inputs.base_branch }}
+permissions:
+  contents: write
+  pull-requests: write
 
-      - run: |
-          git config user.name "github-actions[bot]"
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout base branch
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.base_branch }}
+
+      - name: Configure git
+        run: |
+          git config user.name  "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - id: br
+      - name: Create feature branch
         run: |
-          BR="${{ inputs.head_branch }}"
-          if [ -z "$BR" ]; then BR="auto/patch-${{ github.run_id }}"; fi
-          echo "BRANCH=$BR" >> "$GITHUB_ENV"
+          BR="auto/patch-${{ github.run_id }}"
+          git checkout -b "$BR"
 
-      - if: ${{ inputs.patch_b64 != '' }}
-        env:
-          PATCH_B64: ${{ inputs.patch_b64 }}
+      # patch_b64 가 비어있지 않을 때만 실행
+      - name: Apply patch if provided
+        if: ${{ github.event.inputs.patch_b64 && github.event.inputs.patch_b64 != '' }}
+        shell: bash
         run: |
-          python3 - <<'PY'
-import os, base64
-open('patch.diff','wb').write(base64.b64decode(os.environ['PATCH_B64']))
-PY
-          git apply -p0 --whitespace=nowarn patch.diff || git apply -p1 --whitespace=nowarn patch.diff
-
-      - run: |
-          printf 'hello from GitHub Actions at %s\n' "$(date -u +%FT%TZ)" > hello.txt
-
-      - run: |
-          if ! git diff --staged --quiet || ! git diff --quiet; then
-            git add -A
-            git commit -m "${{ inputs.pr_title }}"
-          fi
-
-      - run: git push -u origin "$BRANCH"
-
-      - env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          OWNER: ${{ github.repository_owner }}
-          REPO: ${{ github.event.repository.name }}
-          BASE: ${{ inputs.base_branch }}
-          HEAD: ${{ github.repository_owner }}:"$BRANCH"
-          TITLE: ${{ inputs.pr_title }}
-        run: |
-          set -e
-          P=$(jq -n --arg t "$TITLE" --arg h "$HEAD" --arg b "$BASE" '{title:$t,head:$h,base:$b}')
-          R=$(curl -sS -w '\n%{http_code}' \
-               -H "Authorization: Bearer $GH_TOKEN" \
-               -H "Accept: application/vnd.github+json" \
-               -d "$P" "https://api.github.com/repos/$OWNER/$REPO/pulls")
-          B=$(echo "$R" | head -n -1)
-          C=$(echo "$R" | tail -n1)
-          if [ "$C" = "201" ] || [ "$C" = "200" ]; then
-            echo "$B" | jq -r '.html_url'
+          set -euo pipefail
+          # CR/LF 섞여 들어온 인코딩 깨짐 방지
+          printf '%s' "${{ github.event.inputs.patch_b64 }}" | tr -d '\r\n' | base64 -d > patch.diff
+          # 먼저 검증
+          if git apply --ignore-whitespace --check patch.diff; then
+            git apply --ignore-whitespace --index patch.diff
           else
-            if echo "$B" | jq -r '.errors[0].message // empty' | grep -qi 'already exists'; then
-              curl -sS -H "Authorization: Bearer $GH_TOKEN" \
-                   -H "Accept: application/vnd.github+json" \
-                   "https://api.github.com/repos/$OWNER/$REPO/pulls?head=$(printf %s "$HEAD" | sed 's/:/%3A/')" \
-              | jq -r '.[0].html_url'
-            else
-              echo "$B"; exit 1
-            fi
+            echo "::warning title=git apply failed::retry with -p1"
+            git apply -p1 --ignore-whitespace --index patch.diff
           fi
+
+      - name: Commit changes if any
+        run: |
+          if ! git diff --cached --quiet; then
+            git commit -m "Auto patch from n8n"
+          fi
+
+      - name: Push branch
+        run: |
+          BR="auto/patch-${{ github.run_id }}"
+          git push -u origin "$BR"
+
+      - name: Create Pull Request
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BR="auto/patch-${{ github.run_id }}"
+          gh pr create \
+            --title "${{ github.event.inputs.pr_title }}" \
+            --body  "Automated patch from n8n" \
+            --base  "${{ github.event.inputs.base_branch }}" \
+            --head  "$BR" || true
