@@ -36,7 +36,7 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      #  브랜치 생성은 이 한 번만
+      # ✅ 새 작업 브랜치 생성/스위치 (한 번만)
       - name: Create work branch
         id: mkbranch
         shell: bash
@@ -47,6 +47,7 @@ jobs:
           git switch -c "$BR" || git checkout -b "$BR"
           echo "branch=$BR" >> "$GITHUB_OUTPUT"
 
+      # (옵션) n8n에서 넘어온 patch_b64 적용
       - name: Apply patch if provided
         id: apply
         shell: bash
@@ -71,6 +72,7 @@ jobs:
           fi
           echo "did_apply=$DID_APPLY" >> "$GITHUB_OUTPUT"
 
+      # ✅ 변경 0건이어도 PR이 생기도록 최소 1개 변경 보장
       - name: Ensure at least one change
         shell: bash
         run: |
@@ -82,6 +84,7 @@ jobs:
           } >> .n8n-diagnose.txt
           git add .n8n-diagnose.txt
 
+      # ✅ 커밋 (누락됐던 fi 추가 완료)
       - name: Commit if changes exist
         id: commit
         shell: bash
@@ -93,8 +96,9 @@ jobs:
           else
             echo "No staged changes; skip commit."
             echo "did_commit=false" >> "$GITHUB_OUTPUT"
-          fi   # ✅ 빠져있던 fi 추가
+          fi
 
+      # ✅ 커밋된 경우에만 push
       - name: Push branch
         if: steps.commit.outputs.did_commit == 'true'
         shell: bash
@@ -102,6 +106,7 @@ jobs:
           set -euo pipefail
           git push -u origin "${{ steps.mkbranch.outputs.branch }}"
 
+      # ✅ 커밋된 경우에만 PR 생성
       - name: Create Pull Request
         if: steps.commit.outputs.did_commit == 'true'
         env:
