@@ -6,7 +6,7 @@ on:
       base_branch:
         description: 'Base branch'
         required: true
-        default: main
+        default: 'main'
       pr_title:
         description: 'PR title'
         required: true
@@ -23,57 +23,78 @@ permissions:
 jobs:
   apply:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout base branch
+      - name: Checkout base
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.base_branch }}
+          ref: ${{ inputs.base_branch }}
+          fetch-depth: 0
 
-      - name: Configure git
+      - name: Git identity
         run: |
-          git config user.name  "github-actions[bot]"
+          git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Create feature branch
-        run: |
-          BR="auto/patch-${{ github.run_id }}"
-          git checkout -b "$BR"
-
-      # patch_b64 가 비어있지 않을 때만 실행
-      - name: Apply patch if provided
-        if: ${{ github.event.inputs.patch_b64 && github.event.inputs.patch_b64 != '' }}
+      - name: Create working branch
+        id: mkbranch
         shell: bash
         run: |
           set -euo pipefail
-          # CR/LF 섞여 들어온 인코딩 깨짐 방지
-          printf '%s' "${{ github.event.inputs.patch_b64 }}" | tr -d '\r\n' | base64 -d > patch.diff
-          # 먼저 검증
-          if git apply --ignore-whitespace --check patch.diff; then
-            git apply --ignore-whitespace --index patch.diff
-          else
-            echo "::warning title=git apply failed::retry with -p1"
-            git apply -p1 --ignore-whitespace --index patch.diff
-          fi
+          BR="auto/patch-${{ github.run_id }}"
+          git switch -c "$BR"
+          echo "branch=$BR" >> "$GITHUB_OUTPUT"
 
-      - name: Commit changes if any
+      - name: Apply patch if provided
+        id: apply
+        shell: bash
         run: |
-          if ! git diff --cached --quiet; then
-            git commit -m "Auto patch from n8n"
+          set -euo pipefail
+          DID_APPLY="false"
+          if [ -n "${{ inputs.patch_b64 }}" ]; then
+            printf "%s" "${{ inputs.patch_b64 }}" | tr -d '\r\n' | base64 -d > patch.diff
+            echo "[preview]"; head -n 50 patch.diff || true
+            if git apply --check --whitespace=nowarn patch.diff; then
+              git apply --index --whitespace=nowarn patch.diff
+              DID_APPLY="true"
+            else
+              if git apply --check --whitespace=nowarn -p1 patch.diff; then
+                git apply --index --whitespace=nowarn -p1 patch.diff
+                DID_APPLY="true"
+              else
+                echo "::error::git apply failed"
+                exit 1
+              fi
+            fi
           fi
+          echo "did_apply=$DID_APPLY" >> "$GITHUB_OUTPUT"
+
+      - name: Commit if changes exist
+        id: commit
+        shell: bash
+        run: |
+          set -euo pipefail
+          if ! git diff --cached --quiet; then
+            git commit -m "${{ inputs.pr_title }}"
+            echo "did_commit=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "No staged changes; skip commit."
+            echo "did_commit=false" >> "$GITHUB_OUTPUT"
 
       - name: Push branch
+        shell: bash
         run: |
-          BR="auto/patch-${{ github.run_id }}"
-          git push -u origin "$BR"
+          set -euo pipefail
+          git push -u origin "${{ steps.mkbranch.outputs.branch }}"
 
       - name: Create Pull Request
+        if: steps.commit.outputs.did_commit == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        shell: bash
         run: |
-          BR="auto/patch-${{ github.run_id }}"
+          set -euo pipefail
           gh pr create \
-            --title "${{ github.event.inputs.pr_title }}" \
-            --body  "Automated patch from n8n" \
-            --base  "${{ github.event.inputs.base_branch }}" \
-            --head  "$BR" || true
+            --head "${{ steps.mkbranch.outputs.branch }}" \
+            --base "${{ inputs.base_branch }}" \
+            --title "${{ inputs.pr_title }}" \
+            --body "Automated patch via workflow run ${{ github.run_id }}"
