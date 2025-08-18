@@ -1,4 +1,4 @@
-name: Apply Patch
+name: apply-and-pr
 
 on:
   workflow_dispatch:
@@ -13,22 +13,21 @@ on:
         default: "Auto patch from n8n"
       patch_b64:
         description: "Base64-encoded unified diff"
-        required: true
-
-permissions:
-  contents: write
-  pull-requests: write
+        required: false
+      head_branch:
+        description: "Feature branch name (optional)"
+        required: false
+        default: ""
 
 jobs:
-  apply-and-pr:
+  run:
     runs-on: ubuntu-latest
+
     steps:
-      - name: Checkout base
+      - name: Checkout base branch
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.base_branch }}
-          fetch-depth: 0
-          persist-credentials: true
+          ref: ${{ inputs.base_branch }}
 
       - name: Configure git
         run: |
@@ -37,85 +36,72 @@ jobs:
 
       - name: Create feature branch
         run: |
-          BR="auto/patch-${{ github.run_id }}"
-          if [ "${{ github.event.inputs.base_branch }}" = "$BR" ]; then
-            echo "::error:: base_branch equals feature branch"
-            exit 1
-          fi
+          BR="${{ inputs.head_branch }}"
+          if [ -z "$BR" ]; then BR="auto/patch-${{ github.run_id }}"; fi
+          echo "BRANCH=$BR" >> "$GITHUB_ENV"
           git checkout -b "$BR"
-          echo "BRANCH=$BR" >> $GITHUB_ENV
 
       - name: Apply patch if provided
-        if: ${{ github.event.inputs.patch_b64 != '' }}
+        if: ${{ inputs.patch_b64 != '' }}
         env:
-          PATCH_B64: ${{ github.event.inputs.patch_b64 }}
+          PATCH_B64: ${{ inputs.patch_b64 }}
         run: |
           python3 - <<'PY'
-      import os, base64
-      b = os.environ['PATCH_B64']
-      open('patch.diff','wb').write(base64.b64decode(b))
-      PY
+import os, base64
+b64 = os.environ['PATCH_B64']
+open('patch.diff','wb').write(base64.b64decode(b64))
+PY
           git apply -p0 --whitespace=nowarn patch.diff || git apply -p1 --whitespace=nowarn patch.diff
 
       - name: Create/Update hello.txt
         run: |
           printf "hello from GitHub Actions at %s\n" "$(date -u +%FT%TZ)" > hello.txt
 
-      - name: Stage & commit
+      - name: Stage & commit (if any)
         run: |
-          git add -f hello.txt || true
-          if [ -f ".n8n-diagnose.txt" ]; then git add -f .n8n-diagnose.txt; fi
-          if git diff --cached --quiet; then
-            echo "SKIP_PR=true" >> $GITHUB_ENV
+          if ! git diff --staged --quiet || ! git diff --quiet; then
+            git add -A
+            git commit -m "${{ inputs.pr_title }}"
           else
-            git commit -m "${{ github.event.inputs.pr_title }}"
+            echo "No changes to commit."
           fi
 
       - name: Push branch
-        if: env.SKIP_PR != 'true'
         run: |
           git push -u origin "$BRANCH"
 
-      - name: Create Pull Request (REST, robust)
-        if: env.SKIP_PR != 'true'
+      - name: Create Pull Request (REST; idempotent)
         env:
-          GH_TOKEN: ${{ github.token }}
-          REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           OWNER: ${{ github.repository_owner }}
-          HEAD: ${{ env.BRANCH }}
-          BASE: ${{ github.event.inputs.base_branch }}
-          TITLE: ${{ github.event.inputs.pr_title }}
+          REPO: ${{ github.event.repository.name }}
+          BASE: ${{ inputs.base_branch }}
+          HEAD: ${{ github.repository_owner }}:"$BRANCH"
+          TITLE: ${{ inputs.pr_title }}
         run: |
           set -e
-          BODY="Automated patch from workflow run ${{ github.run_id }}."
-          PAYLOAD=$(printf '{"title":"%s","head":"%s","base":"%s","body":"%s"}' "$TITLE" "$HEAD" "$BASE" "$BODY")
-
-          CODE=$(curl -sS -o pr.json -w "%{http_code}" -X POST \
+          PAYLOAD=$(jq -n \
+            --arg title "$TITLE" \
+            --arg head "$HEAD" \
+            --arg base "$BASE" \
+            '{title:$title, head:$head, base:$base}')
+          RESP=$(curl -sS -w '\n%{http_code}' \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
             -d "$PAYLOAD" \
-            "https://api.github.com/repos/$REPO/pulls")
-
-          echo "HTTP_CODE=$CODE"
-          cat pr.json || true
-
+            "https://api.github.com/repos/$OWNER/$REPO/pulls")
+          BODY=$(echo "$RESP" | head -n -1)
+          CODE=$(echo "$RESP" | tail -n1)
           if [ "$CODE" = "201" ] || [ "$CODE" = "200" ]; then
-            python -c 'import json; print("PR_URL="+json.load(open("pr.json")).get("html_url",""))'
-            exit 0
+            echo "PR_URL=$(echo "$BODY" | jq -r '.html_url')" >> "$GITHUB_OUTPUT"
+            echo "$BODY" | jq -r '.html_url'
+          else
+            if echo "$BODY" | jq -r '.errors[0].message // empty' | grep -qi 'already exists'; then
+              curl -sS -H "Authorization: Bearer $GH_TOKEN" \
+                   -H "Accept: application/vnd.github+json" \
+                   "https://api.github.com/repos/$OWNER/$REPO/pulls?head=$(printf %s "$HEAD" | sed 's/:/%3A/')" \
+              | jq -r '.[0].html_url'
+            else
+              echo "$BODY"; exit 1
+            fi
           fi
-
-          if grep -qi "already exists" pr.json; then
-            curl -sS -H "Authorization: Bearer $GH_TOKEN" \
-              "https://api.github.com/repos/$REPO/pulls?head=$OWNER:$HEAD&state=open" > list.json
-            python -c 'import json; lst=json.load(open("list.json")); print("EXISTING_PR_URL="+(lst[0]["html_url"] if lst else ""))'
-            exit 0
-          fi
-
-          if grep -qi "No commits between" pr.json; then
-            echo "::notice:: No commits between $BASE and $HEAD"
-            exit 0
-          fi
-
-          echo "::error:: PR creation failed"
-          exit 1
-
