@@ -113,12 +113,11 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           if [ -z "$(git status --porcelain)" ]; then
-            # 이 경우는 거의 없지만, 안전망
-            echo "No changes to commit; creating heartbeat diagnose file."
-            echo "Run: ${{ github.run_id }}" > .n8n-heartbeat.txt
-            git add .n8n-heartbeat.txt
+            echo "Nothing staged; no commit will be created."
+          else
+            git commit -m "${PR_TITLE}" || echo "Nothing to commit (already committed)."
           fi
-          git commit -m "${PR_TITLE}" || echo "Nothing to commit (already committed)."
+
 
       - name: Push branch
         run: |
@@ -142,11 +141,35 @@ jobs:
 
       - name: Echo PR info
         run: |
-          echo "PR_NUMBER=${{ steps.cpr.outputs.pull-request-number }}"
-          echo "PR_URL=${{ steps.cpr.outputs.pull-request-url }}"
+          echo "PR_NUMBER=${{ steps.cpr.outputs['pull-request-number'] }}"
+          echo "PR_URL=${{ steps.cpr.outputs['pull-request-url'] }}"
 
       - name: Fail if PR not created
-        if: ${{ steps.cpr.outputs.pull-request-number == '' }}
+        if: ${{ steps.cpr.outputs['pull-request-number'] == '' }}
         run: |
           echo "No PR created (branch equals base)" 1>&2
           exit 1
+
+
+      - name: Ensure at least one change (create diagnose if clean)
+        id: ensure_change
+        run: |
+          set -e
+          rm -f patch.diff || true
+
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "Working tree clean → creating .n8n-diagnose.txt to force PR"
+            {
+              echo "## n8n diagnose"
+              echo "Time: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+              echo "Run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+              echo "Base: ${{ env.BASE_BRANCH }}"
+              echo "Note: No diff vs base; forcing PR with diagnose file."
+            } > .n8n-diagnose.txt
+            git add .n8n-diagnose.txt
+            echo "made_change=true" >> $GITHUB_OUTPUT
+          else
+            echo "made_change=false" >> $GITHUB_OUTPUT
+          fi
+
+ 
