@@ -82,15 +82,38 @@ jobs:
         run: |
           git push -u origin "auto/patch-${{ github.run_id }}"
 
-      - name: Create Pull Request
+      - name: Create Pull Request (REST)
         if: env.SKIP_PR != 'true'
-        uses: peter-evans/create-pull-request@v6
-        with:
-          commit-message: ${{ github.event.inputs.pr_title }}
-          branch: auto/patch-${{ github.run_id }}
-          base: ${{ github.event.inputs.base_branch }}
-          title: ${{ github.event.inputs.pr_title }}
-          body: |
-            Automated patch from workflow run ${{ github.run_id }}.
-            - hello.txt generated/updated
-            - If patch failed, see .n8n-diagnose.txt
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          HEAD: auto/patch-${{ github.run_id }}
+          BASE: ${{ github.event.inputs.base_branch }}
+          TITLE: ${{ github.event.inputs.pr_title }}
+        run: |
+          BODY="Automated patch from workflow run ${{ github.run_id }}."
+          JSON_PAYLOAD=$(printf '{"title":"%s","head":"%s","base":"%s","body":"%s"}' "$TITLE" "$HEAD" "$BASE" "$BODY")
+
+          echo "POST /repos/$REPO/pulls with head=$HEAD base=$BASE"
+          RESP=$(curl -sS -X POST \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/vnd.github+json" \
+            -d "$JSON_PAYLOAD" \
+            "https://api.github.com/repos/$REPO/pulls")
+
+          echo "$RESP" > pr_response.json
+          PR_URL=$(python - << 'PY'
+      import json,sys
+      data=json.load(open("pr_response.json"))
+      print(data.get("html_url",""))
+      PY
+      )
+          if [ -n "$PR_URL" ] && [ "$PR_URL" != "null" ]; then
+            echo "✅ PR created: $PR_URL"
+          else
+            echo "⚠️  PR not created. Raw response:"
+            cat pr_response.json
+            exit 1
+          fi
+
+
