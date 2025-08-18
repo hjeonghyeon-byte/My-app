@@ -34,6 +34,16 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
+      - name: Diagnose ignore status
+        run: |
+          echo "---- .gitignore (top-level) ----"
+          if [ -f ".gitignore" ]; then sed -n '1,120p' .gitignore; else echo "(no .gitignore)"; fi
+          echo "---- check-ignore for hello.txt ----"
+          git check-ignore -v hello.txt || echo "NOT IGNORED"
+          echo "---- status before any changes ----"
+          git status --porcelain
+
+
       # (선택) patch_b64가 넘어오면 적용
       - name: Apply patch if provided
         if: ${{ inputs.patch_b64 != '' }}
