@@ -70,41 +70,46 @@ jobs:
           git apply --whitespace=nowarn --reject --index patch.diff
         shell: bash
 
-      - name: Fallback to patch -p0 / -p1
+      - name: Fallback to patch -p1 / -p0
         id: patch_apply
         if: steps.git_apply.outcome == 'failure'
         continue-on-error: true
         run: |
           set -e
-          # patch 명령은 일반 unified diff에 적합
-          # -p0 먼저 시도, 실패하면 -p1 시도
-          if patch -p0 --forward < patch.diff; then
-            echo "patch -p0 succeeded"
-          elif patch -p1 --forward < patch.diff; then
+          # -p1 먼저( a/ b/ 프리픽스 제거 -> 루트에 hello.txt 생성 )
+          if patch -p1 --forward < patch.diff; then
             echo "patch -p1 succeeded"
+          elif patch -p0 --forward < patch.diff; then
+            echo "patch -p0 succeeded"
           else
             echo "both patch attempts failed" >&2
             exit 1
           fi
-          # patch 명령은 인덱스 갱신을 안 하므로 수동으로 stage
+          # patch 명령은 index를 안 건드리므로 수동 stage
           git add -A
+          # 작업용 패치파일은 커밋에 포함되지 않도록 제거
+          rm -f patch.diff
         shell: bash
+
 
       - name: Diagnose if no changes or apply failed
         id: diagnose
         run: |
           set -e
-          # 변경사항 존재 여부
+          # 혹시 남아있으면 제거(안전장치)
+          rm -f patch.diff || true
+
           if [ -z "$(git status --porcelain)" ]; then
             echo "No changes detected after applying patch."
             echo "## n8n diagnose" > .n8n-diagnose.txt
             echo "Time: $(date -u +"%Y-%m-%dT%H:%M:%SZ")" >> .n8n-diagnose.txt
             echo "GitHub Run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" >> .n8n-diagnose.txt
             echo "" >> .n8n-diagnose.txt
-            echo "First 120 lines of patch.diff:" >> .n8n-diagnose.txt
-            head -n 120 patch.diff >> .n8n-diagnose.txt || true
+            echo "First 120 lines of patch.diff (decoded earlier):" >> .n8n-diagnose.txt
+            # decode 단계에서 head로 이미 로그는 찍었으니 텍스트만 남김
             git add .n8n-diagnose.txt
           fi
+
 
       - name: Commit
         run: |
