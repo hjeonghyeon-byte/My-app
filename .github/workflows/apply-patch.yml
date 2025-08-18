@@ -48,29 +48,71 @@ jobs:
           echo "branch=$BR" >> "$GITHUB_OUTPUT"
 
       # (옵션) n8n에서 넘어온 patch_b64 적용
-      - name: Apply patch if provided
+      - name: Apply patch if provided (robust)
         id: apply
         shell: bash
         run: |
           set -euo pipefail
           DID_APPLY="false"
           if [ -n "${{ inputs.patch_b64 }}" ]; then
-            printf "%s" "${{ inputs.patch_b64 }}" | tr -d '\r\n' | base64 -d > patch.diff
-            echo "[preview]"; head -n 50 patch.diff || true
-            if git apply --check --whitespace=nowarn patch.diff; then
-              git apply --index --whitespace=nowarn patch.diff
-              DID_APPLY="true"
-            else
-              if git apply --check --whitespace=nowarn -p1 patch.diff; then
-                git apply --index --whitespace=nowarn -p1 patch.diff
-                DID_APPLY="true"
-              else
-                echo "::error::git apply failed"
-                exit 1
+            # --- decode (관용 처리) ---
+            echo "[info] patch_b64 length: $(printf "%s" "${{ inputs.patch_b64 }}" | wc -c)"
+            # base64 디코드 실패해도 즉시 죽지 않도록 일시적으로 -e 해제
+            set +e
+            printf "%s" "${{ inputs.patch_b64 }}" | tr -d '\r\n' | base64 -d > patch.diff 2> decode.err
+            DEC_RC=$?
+            set -e
+            if [ $DEC_RC -ne 0 ]; then
+              echo "::warning::base64 decode failed (rc=$DEC_RC). decode.err를 진단으로 커밋합니다."
+              cp decode.err patch.decode.err || true
+            fi
+
+            # CRLF 정규화
+            sed -i 's/\r$//' patch.diff || true
+
+            echo "[preview top 20 lines]"
+            head -n 20 patch.diff || true
+            echo "[preview bottom 20 lines]"
+            tail -n 20 patch.diff || true
+
+            # --- git apply 시도 ---
+            for P in 0 1; do
+              if git apply --check --whitespace=nowarn -p${P} patch.diff 2> apply_check.err; then
+                echo "[info] git apply -p${P} passes check"
+                if git apply --index --whitespace=nowarn -p${P} patch.diff 2> apply.err; then
+                  DID_APPLY="true"
+                  echo "[info] git apply -p${P} succeeded"
+                  break
+                fi
               fi
+            done
+
+            # --- patch(1) 폴백 ---
+            if [ "$DID_APPLY" != "true" ]; then
+              echo "::warning::git apply failed, trying patch(1) fallback"
+              for P in 0 1; do
+                if patch -p${P} -f -s < patch.diff; then
+                  git add -A
+                  DID_APPLY="true"
+                  echo "[info] patch -p${P} succeeded"
+                  break
+                fi
+              done
+            fi
+
+            # --- 최종 실패: 파일만 커밋해서 PR로 진단 ---
+            if [ "$DID_APPLY" != "true" ]; then
+              echo "::warning::All patch strategies failed. Committing patch.diff & logs for review."
+              # 진단 파일 모아두기
+              mkdir -p .n8n-debug || true
+              [ -f decode.err ] && mv decode.err .n8n-debug/ || true
+              [ -f apply_check.err ] && mv apply_check.err .n8n-debug/ || true
+              [ -f apply.err ] && mv apply.err .n8n-debug/ || true
+              git add patch.diff .n8n-debug || true
             fi
           fi
           echo "did_apply=$DID_APPLY" >> "$GITHUB_OUTPUT"
+
 
       # ✅ 변경 0건이어도 PR이 생기도록 최소 1개 변경 보장
       - name: Ensure at least one change
@@ -97,6 +139,13 @@ jobs:
             echo "No staged changes; skip commit."
             echo "did_commit=false" >> "$GITHUB_OUTPUT"
           fi
+
+      - name: Ensure git auth uses token
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git remote set-url origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}"
+
 
       # ✅ 커밋된 경우에만 push
       - name: Push branch
