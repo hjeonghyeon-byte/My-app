@@ -1,109 +1,139 @@
-name: Apply patch from n8n
+name: Apply Patch and Open PR (n8n)
 
 on:
   workflow_dispatch:
     inputs:
       patch_b64:
-        description: Base64-encoded patch (git-diff or unified diff)
+        description: Base64-encoded unified diff
         required: true
       base_branch:
-        description: Base branch to apply on
+        description: Base branch to create PR against
         required: true
         default: main
       pr_title:
-        description: PR title
-        required: false
-        default: "Auto patch from n8n"
+        description: Title of the PR
+        required: true
+        default: Auto patch from n8n
 
 permissions:
   contents: write
   pull-requests: write
 
 jobs:
-  apply-and-test:
+  apply-patch:
     runs-on: ubuntu-latest
     env:
-      BRANCH: auto/patch-${{ github.run_id }}
+      BASE_BRANCH: ${{ github.event.inputs.base_branch }}
+      PATCH_B64: ${{ github.event.inputs.patch_b64 }}
+      PR_TITLE: ${{ github.event.inputs.pr_title }}
 
     steps:
-      - name: Checkout base branch (full)
+      - name: Checkout
         uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.inputs.base_branch }}
+          ref: ${{ env.BASE_BRANCH }}
           fetch-depth: 0
 
-      - name: Configure git identity
+      - name: Install utils
         run: |
-          git config user.name  "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          sudo apt-get update -y
+          sudo apt-get install -y dos2unix patch
 
-      - name: Decode patch (trim spaces/newlines → base64 decode → normalize LF)
+      - name: Prepare work branch
+        id: prep
+        run: |
+          BR="auto/patch-${{ github.run_id }}"
+          echo "BRANCH_NAME=$BR" >> $GITHUB_OUTPUT
+          git checkout -b "$BR"
+
+      - name: Decode base64 → patch.diff (LF normalize)
+        id: decode
+        shell: bash
+        run: |
+          # 1) 공백/개행 정리
+          CLEAN=$(printf "%s" "${PATCH_B64}" | tr -d '\r\n\t ')
+          # 2) base64 디코드
+          echo "$CLEAN" | base64 -d > patch.diff || {
+            echo "Base64 decode failed" >&2
+            exit 1
+          }
+          dos2unix patch.diff || true
+          echo "==== patch.diff head ===="
+          head -n 50 patch.diff || true
+
+      - name: Try git apply (diff --git style)
+        id: git_apply
+        continue-on-error: true
         run: |
           set -e
-          echo "${{ github.event.inputs.patch_b64 }}" | tr -d '\r\n ' | base64 -d > /tmp/patch.diff
-          # 줄바꿈 정규화
-          dos2unix /tmp/patch.diff || true
-          echo "---- patch head ----"
-          head -n 50 /tmp/patch.diff || true
+          # git apply는 diff --git 포맷에 적합
+          git apply --whitespace=nowarn --reject --index patch.diff
+        shell: bash
 
-      - name: Apply patch (git-diff면 git apply, 아니면 patch)
+      - name: Fallback to patch -p0 / -p1
+        id: patch_apply
+        if: steps.git_apply.outcome == 'failure'
+        continue-on-error: true
         run: |
           set -e
-          PATCH=/tmp/patch.diff
-
-          echo "---- sniff patch type ----"
-          head -n 1 "$PATCH" || true
-
-          if head -n1 "$PATCH" | grep -q '^diff --git '; then
-            echo "Using: git apply (with whitespace tolerance)"
-            git apply --reject --whitespace=fix "$PATCH" \
-              || git apply --reject --ignore-whitespace "$PATCH"
+          # patch 명령은 일반 unified diff에 적합
+          # -p0 먼저 시도, 실패하면 -p1 시도
+          if patch -p0 --forward < patch.diff; then
+            echo "patch -p0 succeeded"
+          elif patch -p1 --forward < patch.diff; then
+            echo "patch -p1 succeeded"
           else
-            echo "Using: patch -p0 (LF normalized)"
-            patch -p0 -i "$PATCH" || {
-              echo "patch failed; trying -p1 fallback"
-              patch -p1 -i "$PATCH"
-            }
+            echo "both patch attempts failed" >&2
+            exit 1
           fi
-
+          # patch 명령은 인덱스 갱신을 안 하므로 수동으로 stage
           git add -A
-          if git diff --cached --quiet; then
-            echo "No changes staged; patch may have failed"; exit 1
-          fi
+        shell: bash
 
-          git commit -m "auto: apply patch from n8n (run ${{ github.run_id }})"
-
-      - name: (Optional) Run tests
+      - name: Diagnose if no changes or apply failed
+        id: diagnose
         run: |
-          if [ -x ./run_tests.sh ]; then
-            bash ./run_tests.sh
-          elif [ -f package.json ]; then
-            npm ci && npm test --silent
-          elif ls -1 *test*.py tests 2>/dev/null; then
-            python -m pip install --upgrade pip pytest && pytest -q --maxfail=1 --disable-warnings
-          else
-            echo "No tests found"; exit 0
+          set -e
+          # 변경사항 존재 여부
+          if [ -z "$(git status --porcelain)" ]; then
+            echo "No changes detected after applying patch."
+            echo "## n8n diagnose" > .n8n-diagnose.txt
+            echo "Time: $(date -u +"%Y-%m-%dT%H:%M:%SZ")" >> .n8n-diagnose.txt
+            echo "GitHub Run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" >> .n8n-diagnose.txt
+            echo "" >> .n8n-diagnose.txt
+            echo "First 120 lines of patch.diff:" >> .n8n-diagnose.txt
+            head -n 120 patch.diff >> .n8n-diagnose.txt || true
+            git add .n8n-diagnose.txt
           fi
+
+      - name: Commit
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          if [ -z "$(git status --porcelain)" ]; then
+            # 이 경우는 거의 없지만, 안전망
+            echo "No changes to commit; creating heartbeat diagnose file."
+            echo "Run: ${{ github.run_id }}" > .n8n-heartbeat.txt
+            git add .n8n-heartbeat.txt
+          fi
+          git commit -m "${PR_TITLE}" || echo "Nothing to commit (already committed)."
 
       - name: Push branch
         run: |
-          git switch -c "${{ env.BRANCH }}" || git checkout "${{ env.BRANCH }}"
-          git push --set-upstream origin "${{ env.BRANCH }}"
+          git push --set-upstream origin "$(git rev-parse --abbrev-ref HEAD)"
 
       - name: Create PR
         uses: peter-evans/create-pull-request@v6
         with:
-          branch: ${{ env.BRANCH }}
-          base: ${{ github.event.inputs.base_branch }}
-          title: ${{ github.event.inputs.pr_title }}
+          title: ${{ env.PR_TITLE }}
           body: |
-            Patch applied by n8n.  
-            Run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
-          labels: auto-patch,n8n
+            Automated patch from n8n.
 
-      - name: Show last commits & touched files (for quick check)
-        run: |
-          echo "---- last commits ----"
-          git log -n 3 --oneline
-          echo "---- changed files in this commit ----"
-          git show --name-status --oneline HEAD
+            - Base branch: `${{ env.BASE_BRANCH }}`
+            - Run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          branch: ${{ steps.prep.outputs.BRANCH_NAME }}
+          base: ${{ env.BASE_BRANCH }}
+          labels: |
+            bot
+            auto-patch
+          draft: false
