@@ -91,19 +91,21 @@ jobs:
         id: diagnose
         run: |
           set -e
-          # 혹시 남아있으면 제거(안전장치)
+          # 안전: 작업용 패치파일은 커밋 대상에서 제거
           rm -f patch.diff || true
 
+          # 변경이 없으면 반드시 1개 변경을 만들어 PR이 생기도록 함
           if [ -z "$(git status --porcelain)" ]; then
             echo "No changes detected after applying patch."
-            echo "## n8n diagnose" > .n8n-diagnose.txt
-            echo "Time: $(date -u +"%Y-%m-%dT%H:%M:%SZ")" >> .n8n-diagnose.txt
-            echo "GitHub Run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" >> .n8n-diagnose.txt
-            echo "" >> .n8n-diagnose.txt
-            echo "First 120 lines of patch.diff (decoded earlier):" >> .n8n-diagnose.txt
-            # decode 단계에서 head로 이미 로그는 찍었으니 텍스트만 남김
+            {
+              echo "## n8n diagnose"
+              echo "Time: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
+              echo "Run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+              echo "Note: No diff vs base; forcing PR with diagnose file."
+            } > .n8n-diagnose.txt
             git add .n8n-diagnose.txt
           fi
+
 
 
       - name: Commit
@@ -123,12 +125,12 @@ jobs:
           git push --set-upstream origin "$(git rev-parse --abbrev-ref HEAD)"
 
       - name: Create PR
+        id: cpr
         uses: peter-evans/create-pull-request@v6
         with:
           title: ${{ env.PR_TITLE }}
           body: |
             Automated patch from n8n.
-
             - Base branch: `${{ env.BASE_BRANCH }}`
             - Run: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}
           branch: ${{ steps.prep.outputs.BRANCH_NAME }}
@@ -137,3 +139,14 @@ jobs:
             bot
             auto-patch
           draft: false
+
+      - name: Echo PR info
+        run: |
+          echo "PR_NUMBER=${{ steps.cpr.outputs.pull-request-number }}"
+          echo "PR_URL=${{ steps.cpr.outputs.pull-request-url }}"
+
+      - name: Fail if PR not created
+        if: ${{ steps.cpr.outputs.pull-request-number == '' }}
+        run: |
+          echo "No PR created (branch equals base)" 1>&2
+          exit 1
