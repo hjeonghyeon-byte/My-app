@@ -4,74 +4,61 @@ on:
   workflow_dispatch:
     inputs:
       base_branch:
-        description: "Base branch to patch"
+        description: 'Base branch'
         required: true
-        default: "main"
+        default: main
       pr_title:
-        description: "PR title"
+        description: 'PR title'
         required: true
-        default: "Auto patch from n8n"
+        default: Auto patch from n8n
       patch_b64:
-        description: "Base64-encoded unified diff"
+        description: 'Base64 diff'
         required: false
       head_branch:
-        description: "Feature branch name (optional)"
+        description: 'Feature branch name'
         required: false
-        default: ""
+        default: ''
 
 jobs:
   run:
     runs-on: ubuntu-latest
-
     steps:
-      - name: Checkout base branch
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.base_branch }}
 
-      - name: Configure git
-        run: |
+      - run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      - name: Create feature branch
+      - id: br
         run: |
           BR="${{ inputs.head_branch }}"
           if [ -z "$BR" ]; then BR="auto/patch-${{ github.run_id }}"; fi
           echo "BRANCH=$BR" >> "$GITHUB_ENV"
-          git checkout -b "$BR"
 
-      - name: Apply patch if provided
-        if: ${{ inputs.patch_b64 != '' }}
+      - if: ${{ inputs.patch_b64 != '' }}
         env:
           PATCH_B64: ${{ inputs.patch_b64 }}
         run: |
           python3 - <<'PY'
 import os, base64
-b64 = os.environ['PATCH_B64']
-open('patch.diff','wb').write(base64.b64decode(b64))
+open('patch.diff','wb').write(base64.b64decode(os.environ['PATCH_B64']))
 PY
           git apply -p0 --whitespace=nowarn patch.diff || git apply -p1 --whitespace=nowarn patch.diff
 
-      - name: Create/Update hello.txt
-        run: |
-          printf "hello from GitHub Actions at %s\n" "$(date -u +%FT%TZ)" > hello.txt
+      - run: |
+          printf 'hello from GitHub Actions at %s\n' "$(date -u +%FT%TZ)" > hello.txt
 
-      - name: Stage & commit (if any)
-        run: |
+      - run: |
           if ! git diff --staged --quiet || ! git diff --quiet; then
             git add -A
             git commit -m "${{ inputs.pr_title }}"
-          else
-            echo "No changes to commit."
           fi
 
-      - name: Push branch
-        run: |
-          git push -u origin "$BRANCH"
+      - run: git push -u origin "$BRANCH"
 
-      - name: Create Pull Request (REST; idempotent)
-        env:
+      - env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           OWNER: ${{ github.repository_owner }}
           REPO: ${{ github.event.repository.name }}
@@ -80,28 +67,22 @@ PY
           TITLE: ${{ inputs.pr_title }}
         run: |
           set -e
-          PAYLOAD=$(jq -n \
-            --arg title "$TITLE" \
-            --arg head "$HEAD" \
-            --arg base "$BASE" \
-            '{title:$title, head:$head, base:$base}')
-          RESP=$(curl -sS -w '\n%{http_code}' \
-            -H "Authorization: Bearer $GH_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            -d "$PAYLOAD" \
-            "https://api.github.com/repos/$OWNER/$REPO/pulls")
-          BODY=$(echo "$RESP" | head -n -1)
-          CODE=$(echo "$RESP" | tail -n1)
-          if [ "$CODE" = "201" ] || [ "$CODE" = "200" ]; then
-            echo "PR_URL=$(echo "$BODY" | jq -r '.html_url')" >> "$GITHUB_OUTPUT"
-            echo "$BODY" | jq -r '.html_url'
+          P=$(jq -n --arg t "$TITLE" --arg h "$HEAD" --arg b "$BASE" '{title:$t,head:$h,base:$b}')
+          R=$(curl -sS -w '\n%{http_code}' \
+               -H "Authorization: Bearer $GH_TOKEN" \
+               -H "Accept: application/vnd.github+json" \
+               -d "$P" "https://api.github.com/repos/$OWNER/$REPO/pulls")
+          B=$(echo "$R" | head -n -1)
+          C=$(echo "$R" | tail -n1)
+          if [ "$C" = "201" ] || [ "$C" = "200" ]; then
+            echo "$B" | jq -r '.html_url'
           else
-            if echo "$BODY" | jq -r '.errors[0].message // empty' | grep -qi 'already exists'; then
+            if echo "$B" | jq -r '.errors[0].message // empty' | grep -qi 'already exists'; then
               curl -sS -H "Authorization: Bearer $GH_TOKEN" \
                    -H "Accept: application/vnd.github+json" \
                    "https://api.github.com/repos/$OWNER/$REPO/pulls?head=$(printf %s "$HEAD" | sed 's/:/%3A/')" \
               | jq -r '.[0].html_url'
             else
-              echo "$BODY"; exit 1
+              echo "$B"; exit 1
             fi
           fi
