@@ -4,16 +4,17 @@ on:
   workflow_dispatch:
     inputs:
       base_branch:
-        description: 'Base branch to open PR against (e.g., main)'
+        description: Base branch
         required: true
         default: main
       pr_title:
-        description: 'PR title'
-        required: false
+        description: PR title
+        required: true
         default: Auto patch from n8n
       patch_b64:
-        description: 'Optional: Base64-encoded patch to apply'
+        description: Optional Base64 patch
         required: false
+        default: ""
 
 permissions:
   contents: write
@@ -23,7 +24,7 @@ jobs:
   apply-and-pr:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout base branch
+      - name: Checkout base
         uses: actions/checkout@v4
         with:
           ref: ${{ github.event.inputs.base_branch }}
@@ -39,10 +40,11 @@ jobs:
         run: |
           BR="auto/patch-${{ github.run_id }}"
           if [ "${{ github.event.inputs.base_branch }}" = "$BR" ]; then
-            echo "::error:: base_branch and working branch are the same."
+            echo "::error:: base_branch equals feature branch"
             exit 1
           fi
           git checkout -b "$BR"
+          echo "BRANCH=$BR" >> $GITHUB_ENV
 
       - name: Apply patch if provided
         if: ${{ github.event.inputs.patch_b64 != '' }}
@@ -51,96 +53,63 @@ jobs:
           if git apply --ignore-whitespace --check patch.diff; then
             git apply --ignore-whitespace patch.diff
           else
-            echo "::warning:: patch.diff failed; writing diagnose file"
-            echo "Patch apply failed at $(date -u +%FT%TZ)" >> .n8n-diagnose.txt
+            echo "Patch apply failed" >> .n8n-diagnose.txt
           fi
 
       - name: Create/Update hello.txt
         run: |
           printf "hello from GitHub Actions at %s\n" "$(date -u +%FT%TZ)" > hello.txt
 
-      - name: Show workspace after create
-        run: |
-          ls -al
-          git status --porcelain
-          head -n 2 hello.txt || true
-
-      - name: Stage & commit (force add)
+      - name: Stage & commit
         run: |
           git add -f hello.txt || true
           if [ -f ".n8n-diagnose.txt" ]; then git add -f .n8n-diagnose.txt; fi
           if git diff --cached --quiet; then
-            echo "No changes to commit."
             echo "SKIP_PR=true" >> $GITHUB_ENV
           else
             git commit -m "${{ github.event.inputs.pr_title }}"
-            git show --name-status --oneline -n 1
           fi
 
       - name: Push branch
         if: env.SKIP_PR != 'true'
         run: |
-          git push -u origin "auto/patch-${{ github.run_id }}"
+          git push -u origin "$BRANCH"
 
-      - name: Create Pull Request (REST, robust)
+      - name: Create Pull Request (REST)
         if: env.SKIP_PR != 'true'
         env:
           GH_TOKEN: ${{ github.token }}
           REPO: ${{ github.repository }}
           OWNER: ${{ github.repository_owner }}
-          HEAD: auto/patch-${{ github.run_id }}
+          HEAD: ${{ env.BRANCH }}
           BASE: ${{ github.event.inputs.base_branch }}
           TITLE: ${{ github.event.inputs.pr_title }}
         run: |
           set -e
           BODY="Automated patch from workflow run ${{ github.run_id }}."
-          JSON=$(printf '{"title":"%s","head":"%s","base":"%s","body":"%s"}' "$TITLE" "$HEAD" "$BASE" "$BODY")
-
-          # 1) PR 생성 시도
-          HTTP_CODE=$(curl -sS -o pr.json -w "%{http_code}" -X POST \
+          PAYLOAD=$(printf '{"title":"%s","head":"%s","base":"%s","body":"%s"}' "$TITLE" "$HEAD" "$BASE" "$BODY")
+          CODE=$(curl -sS -o pr.json -w "%{http_code}" -X POST \
             -H "Authorization: Bearer $GH_TOKEN" \
             -H "Accept: application/vnd.github+json" \
-            -d "$JSON" \
+            -d "$PAYLOAD" \
             "https://api.github.com/repos/$REPO/pulls")
-          echo "HTTP_CODE=$HTTP_CODE"
-          echo "---- create response ----"
-          cat pr.json || true
-
-          if [ "$HTTP_CODE" = "201" ] || [ "$HTTP_CODE" = "200" ]; then
-            PR_URL=$(python - << 'PY'
-import json
-print(json.load(open("pr.json")).get("html_url",""))
+          echo "HTTP_CODE=$CODE"
+          if [ "$CODE" = "201" ] || [ "$CODE" = "200" ]; then
+            python - <<'PY'
+import json; print("PR_URL="+json.load(open("pr.json")).get("html_url",""))
 PY
-)
-            echo "✅ PR created: $PR_URL"
             exit 0
           fi
-
-          # 2) 이미 PR 존재(422)인 경우: 기존 PR URL 조회
           if grep -qi "already exists" pr.json; then
-            echo "ℹ️ PR already exists; searching open PR by head..."
             curl -sS -H "Authorization: Bearer $GH_TOKEN" \
               "https://api.github.com/repos/$REPO/pulls?head=$OWNER:$HEAD&state=open" > list.json
-            echo "---- list response ----"
-            cat list.json || true
-            PR_URL=$(python - << 'PY'
-import json,sys
-lst=json.load(open("list.json"))
-print(lst[0]["html_url"] if lst else "")
+            python - <<'PY'
+import json; lst=json.load(open("list.json")); print("EXISTING_PR_URL="+(lst[0]["html_url"] if lst else ""))
 PY
-)
-            if [ -n "$PR_URL" ]; then
-              echo "✅ Existing PR: $PR_URL"
-              exit 0
-            fi
-          fi
-
-          # 3) 커밋 차이 없음(422)일 때는 공지 후 통과
-          if grep -qi "No commits between" pr.json; then
-            echo "::notice:: No commits between $BASE and $HEAD; PR not needed."
             exit 0
           fi
-
-          echo "::error:: PR creation failed
-
-
+          if grep -qi "No commits between" pr.json; then
+            echo "::notice:: No commits between $BASE and $HEAD"
+            exit 0
+          fi
+          echo "::error:: PR creation failed"; cat pr.json; exit 1
