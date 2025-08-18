@@ -6,11 +6,11 @@ on:
       base_branch:
         description: 'Base branch to open PR against (e.g., main)'
         required: true
-        default: 'main'
+        default: main
       pr_title:
         description: 'PR title'
         required: false
-        default: 'Auto patch from n8n'
+        default: Auto patch from n8n
       patch_b64:
         description: 'Optional: Base64-encoded patch to apply'
         required: false
@@ -28,30 +28,30 @@ jobs:
         with:
           ref: ${{ github.event.inputs.base_branch }}
           fetch-depth: 0
+          persist-credentials: true
 
       - name: Configure git
         run: |
-          git config user.name  "github-actions[bot]"
+          git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      # 여기로 이동 (브랜치 먼저 생성)
-      - name: Create feature branch first
+      - name: Create feature branch
         run: |
-          BR=auto/patch-${{ github.run_id }}
+          BR="auto/patch-${{ github.run_id }}"
           if [ "${{ github.event.inputs.base_branch }}" = "$BR" ]; then
-            echo "::error:: base_branch와 작업 브랜치가 같습니다."
+            echo "::error:: base_branch and working branch are the same."
             exit 1
           fi
           git checkout -b "$BR"
 
       - name: Apply patch if provided
-        if: ${{ inputs.patch_b64 != '' }}
+        if: ${{ github.event.inputs.patch_b64 != '' }}
         run: |
-          echo "${{ inputs.patch_b64 }}" | base64 -d > patch.diff
+          echo "${{ github.event.inputs.patch_b64 }}" | base64 -d > patch.diff
           if git apply --ignore-whitespace --check patch.diff; then
             git apply --ignore-whitespace patch.diff
           else
-            echo "::warning:: patch.diff 적용 실패; .n8n-diagnose.txt 생성"
+            echo "::warning:: patch.diff failed; writing diagnose file"
             echo "Patch apply failed at $(date -u +%FT%TZ)" >> .n8n-diagnose.txt
           fi
 
@@ -59,50 +59,28 @@ jobs:
         run: |
           printf "hello from GitHub Actions at %s\n" "$(date -u +%FT%TZ)" > hello.txt
 
-      #  새로 추가: 생성 직후 실제로 보이나 체크
       - name: Show workspace after create
         run: |
-          echo "---- ls ----"
           ls -al
-          echo "---- git status ----"
           git status --porcelain
-          echo "---- hello preview ----"
           head -n 2 hello.txt || true
 
-      # (기존) Commit changes if any
-      # (기존) Push branch
-      # (기존) Create Pull Request
-
-
-- name: Stage & commit (force add)
-  run: |
-    echo "---- status before add ----"
-    git status --porcelain
-
-    # hello.txt를 .gitignore 여부와 무관하게 강제 포함
-    git add -f hello.txt
-    # (선택) 진단 파일이 있으면 함께 포함
-    if [ -f ".n8n-diagnose.txt" ]; then git add -f .n8n-diagnose.txt; fi
-
-    echo "---- staged diff ----"
-    git diff --cached --name-status || true
-
-    if git diff --cached --quiet; then
-      echo "No changes to commit."
-      echo "SKIP_PR=true" >> $GITHUB_ENV
-    else
-      git commit -m "${{ github.event.inputs.pr_title }}"
-      echo "===== COMMIT SUMMARY ====="
-      git log --oneline -n 1
-      echo "===== SHOW DIFF ====="
-      git show --name-status --oneline -n 1
-    fi
-
+      - name: Stage & commit (force add)
+        run: |
+          git add -f hello.txt || true
+          if [ -f ".n8n-diagnose.txt" ]; then git add -f .n8n-diagnose.txt; fi
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            echo "SKIP_PR=true" >> $GITHUB_ENV
+          else
+            git commit -m "${{ github.event.inputs.pr_title }}"
+            git show --name-status --oneline -n 1
+          fi
 
       - name: Push branch
         if: env.SKIP_PR != 'true'
         run: |
-          git push -u origin auto/patch-${{ github.run_id }}
+          git push -u origin "auto/patch-${{ github.run_id }}"
 
       - name: Create Pull Request
         if: env.SKIP_PR != 'true'
@@ -113,6 +91,6 @@ jobs:
           base: ${{ github.event.inputs.base_branch }}
           title: ${{ github.event.inputs.pr_title }}
           body: |
-            Automated patch from n8n.
+            Automated patch from workflow run ${{ github.run_id }}.
             - hello.txt generated/updated
-            - If patch was provided and failed, see .n8n-diagnose.txt
+            - If patch failed, see .n8n-diagnose.txt
