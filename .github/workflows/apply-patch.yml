@@ -50,35 +50,27 @@ jobs:
       # (옵션) n8n에서 넘어온 patch_b64 적용
       - name: Apply patch if provided (robust)
         id: apply
+        env:
+          PATCH_B64: ${{ inputs.patch_b64 }}   # ← 셸로 값 전달 (셸 내부에 ${{ }} 쓰지 않음)
         shell: bash
         run: |
-          set -euo pipefail
-          DID_APPLY="false"
-          if [ -n "${{ inputs.patch_b64 }}" ]; then
-            # --- decode (관용 처리) ---
-            echo "[info] patch_b64 length: $(printf "%s" "${{ inputs.patch_b64 }}" | wc -c)"
-            # base64 디코드 실패해도 즉시 죽지 않도록 일시적으로 -e 해제
-            set +e
-            printf "%s" "${{ inputs.patch_b64 }}" | tr -d '\r\n' | base64 -d > patch.diff 2> decode.err
-            DEC_RC=$?
-            set -e
-            if [ $DEC_RC -ne 0 ]; then
-              echo "::warning::base64 decode failed (rc=$DEC_RC). decode.err를 진단으로 커밋합니다."
-              cp decode.err patch.decode.err || true
-            fi
+          # set -u 제거 (unset 변수로 실패 방지)
+          set -eo pipefail
 
-            # CRLF 정규화
+          DID_APPLY="false"
+          if [ -n "${PATCH_B64:-}" ]; then
+            echo "[info] patch_b64 length: $(printf '%s' "$PATCH_B64" | wc -c)"
+
+            # base64 디코드 (개행 제거 + CRLF 정규화)
+            printf '%s' "$PATCH_B64" | tr -d '\r\n' | base64 -d > patch.diff 2> decode.err || true
             sed -i 's/\r$//' patch.diff || true
 
-            echo "[preview top 20 lines]"
-            head -n 20 patch.diff || true
-            echo "[preview bottom 20 lines]"
-            tail -n 20 patch.diff || true
+            echo "[preview top 20]"; head -n 20 patch.diff || true
+            echo "[preview bottom 20]"; tail -n 20 patch.diff || true
 
-            # --- git apply 시도 ---
+            # git apply 시도 (-p0 → -p1)
             for P in 0 1; do
               if git apply --check --whitespace=nowarn -p${P} patch.diff 2> apply_check.err; then
-                echo "[info] git apply -p${P} passes check"
                 if git apply --index --whitespace=nowarn -p${P} patch.diff 2> apply.err; then
                   DID_APPLY="true"
                   echo "[info] git apply -p${P} succeeded"
@@ -87,9 +79,8 @@ jobs:
               fi
             done
 
-            # --- patch(1) 폴백 ---
-            if [ "$DID_APPLY" != "true" ]; then
-              echo "::warning::git apply failed, trying patch(1) fallback"
+            # patch(1) 폴백
+            if [ "$DID_APPLY" != "true" ] && command -v patch >/dev/null 2>&1; then
               for P in 0 1; do
                 if patch -p${P} -f -s < patch.diff; then
                   git add -A
@@ -100,18 +91,19 @@ jobs:
               done
             fi
 
-            # --- 최종 실패: 파일만 커밋해서 PR로 진단 ---
+            # 최종 실패: 진단 아티팩트 커밋
             if [ "$DID_APPLY" != "true" ]; then
-              echo "::warning::All patch strategies failed. Committing patch.diff & logs for review."
-              # 진단 파일 모아두기
+              echo "::warning::Patch application failed. Committing patch.diff and debug logs."
               mkdir -p .n8n-debug || true
-              [ -f decode.err ] && mv decode.err .n8n-debug/ || true
-              [ -f apply_check.err ] && mv apply_check.err .n8n-debug/ || true
-              [ -f apply.err ] && mv apply.err .n8n-debug/ || true
+              [ -s decode.err ] && mv decode.err .n8n-debug/ || true
+              [ -s apply_check.err ] && mv apply_check.err .n8n-debug/ || true
+              [ -s apply.err ] && mv apply.err .n8n-debug/ || true
               git add patch.diff .n8n-debug || true
             fi
           fi
+
           echo "did_apply=$DID_APPLY" >> "$GITHUB_OUTPUT"
+
 
 
       # ✅ 변경 0건이어도 PR이 생기도록 최소 1개 변경 보장
