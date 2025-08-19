@@ -160,3 +160,24 @@ jobs:
             --base "${{ inputs.base_branch }}" \
             --title "${{ inputs.pr_title }}" \
             --body "Automated patch via workflow run ${{ github.run_id }}"
+
+      - name: Apply patch
+        shell: bash
+        run: |
+          set -e
+          git config core.autocrlf false
+          base64 -d patch.b64 | gunzip > patch.diff
+          git apply -p1 --whitespace=nowarn --check patch.diff
+          git apply -p1 --whitespace=nowarn patch.diff
+      
+      - name: Verify required files exist
+        shell: bash
+        run: |
+          set -e
+          req=(apps/lotto/lotto.py tests/test_lotto.py requirements.txt)
+          for f in "${req[@]}"; do
+            if ! git ls-files --error-unmatch "$f" >/dev/null 2>&1; then
+              echo "::error ::Required file missing after apply: $f"
+              exit 1
+            fi
+          done
