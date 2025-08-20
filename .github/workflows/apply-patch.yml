@@ -1,4 +1,4 @@
-name: apply-and-pr
+name: apply-patch
 
 on:
   workflow_dispatch:
@@ -15,6 +15,14 @@ on:
         description: 'Base64-encoded patch (optional)'
         required: false
         default: ''
+      required_files:
+        description: 'JSON array of required files to exist after apply (optional)'
+        required: false
+        default: '[]'
+      must_create:
+        description: 'JSON array of files that must be newly created (optional)'
+        required: false
+        default: '[]'
 
 permissions:
   contents: write
@@ -36,7 +44,6 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
-      # ✅ 새 작업 브랜치 생성/스위치 (한 번만)
       - name: Create work branch
         id: mkbranch
         shell: bash
@@ -47,28 +54,49 @@ jobs:
           git switch -c "$BR" || git checkout -b "$BR"
           echo "branch=$BR" >> "$GITHUB_OUTPUT"
 
-      # (옵션) n8n에서 넘어온 patch_b64 적용
       - name: Apply patch if provided (robust)
         id: apply
         env:
-          PATCH_B64: ${{ inputs.patch_b64 }}   # ← 셸로 값 전달 (셸 내부에 ${{ }} 쓰지 않음)
+          PATCH_B64: ${{ inputs.patch_b64 }}
+          REQUIRED_FILES: ${{ inputs.required_files }}
+          MUST_CREATE: ${{ inputs.must_create }}
         shell: bash
         run: |
-          # set -u 제거 (unset 변수로 실패 방지)
           set -eo pipefail
-
           DID_APPLY="false"
+
           if [ -n "${PATCH_B64:-}" ]; then
             echo "[info] patch_b64 length: $(printf '%s' "$PATCH_B64" | wc -c)"
 
-            # base64 디코드 (개행 제거 + CRLF 정규화)
+            # decode base64 -> patch.diff (normalize CRLF)
             printf '%s' "$PATCH_B64" | tr -d '\r\n' | base64 -d > patch.diff 2> decode.err || true
             sed -i 's/\r$//' patch.diff || true
+
+            # parse JSON inputs to arrays (required_files, must_create)
+            python - <<'PY'
+import json, os
+open('.rf.list','w').write('\n'.join(json.loads(os.environ.get('REQUIRED_FILES','[]'))))
+open('.mc.list','w').write('\n'.join(json.loads(os.environ.get('MUST_CREATE','[]'))))
+PY
+            mapfile -t RF < .rf.list || true
+            mapfile -t MC < .mc.list || true
+
+            # pre-apply: warn if required/must_create targets aren't in diff headers
+            if [ ${#RF[@]} -gt 0 ]; then
+              for f in "${RF[@]}"; do
+                grep -q -E "^(diff --git a/${f} b/${f}|\+\+\+ b/${f})$" patch.diff || echo "::warning ::Required file not present in diff (pre-apply): $f"
+              done
+            fi
+            if [ ${#MC[@]} -gt 0 ]; then
+              for f in "${MC[@]}"; do
+                (grep -q -E "^\+\+\+ b/${f}$" patch.diff && grep -q -E "^--- /dev/null$" patch.diff) || echo "::warning ::Must-create header not found (pre-apply): $f"
+              done
+            fi
 
             echo "[preview top 20]"; head -n 20 patch.diff || true
             echo "[preview bottom 20]"; tail -n 20 patch.diff || true
 
-            # git apply 시도 (-p0 → -p1)
+            # try git apply (-p0 then -p1)
             for P in 0 1; do
               if git apply --check --whitespace=nowarn -p${P} patch.diff 2> apply_check.err; then
                 if git apply --index --whitespace=nowarn -p${P} patch.diff 2> apply.err; then
@@ -79,7 +107,7 @@ jobs:
               fi
             done
 
-            # patch(1) 폴백
+            # fallback to `patch` if needed
             if [ "$DID_APPLY" != "true" ] && command -v patch >/dev/null 2>&1; then
               for P in 0 1; do
                 if patch -p${P} -f -s < patch.diff; then
@@ -91,9 +119,20 @@ jobs:
               done
             fi
 
-            # 최종 실패: 진단 아티팩트 커밋
-            if [ "$DID_APPLY" != "true" ]; then
-              echo "::warning::Patch application failed. Committing patch.diff and debug logs."
+            # post-apply logs + required_files existence check
+            if [ "$DID_APPLY" = "true" ]; then
+              echo "[git status --porcelain]"; git status --porcelain || true
+              echo "[git diff --cached --name-status]"; git diff --cached --name-status || true
+              if [ ${#RF[@]} -gt 0 ]; then
+                for f in "${RF[@]}"; do
+                  if ! test -f "$f"; then
+                    echo "::error ::Required file missing after apply: $f"
+                    exit 1
+                  fi
+                done
+              fi
+            else
+              echo "::warning ::Patch application failed. Committing patch.diff and debug logs."
               mkdir -p .n8n-debug || true
               [ -s decode.err ] && mv decode.err .n8n-debug/ || true
               [ -s apply_check.err ] && mv apply_check.err .n8n-debug/ || true
@@ -104,24 +143,6 @@ jobs:
 
           echo "did_apply=$DID_APPLY" >> "$GITHUB_OUTPUT"
 
-
-      # ✅ (이동) 패치 적용 직후, 필요한 파일이 실제 생겼는지 점검
-      - name: Verify required files exist (only when patch applied)
-        if: steps.apply.outputs.did_apply == 'true'
-        shell: bash
-        run: |
-          set -euo pipefail
-          req=(apps/lotto/lotto.py tests/test_lotto.py requirements.txt)
-          for f in "${req[@]}"; do
-            if ! test -f "$f"; then
-              echo "::error ::Required file missing after apply: $f"
-              exit 1
-            fi
-          done
-
-
-
-      # ✅ 변경 0건이어도 PR이 생기도록 최소 1개 변경 보장
       - name: Ensure at least one change
         shell: bash
         run: |
@@ -133,7 +154,6 @@ jobs:
           } >> .n8n-diagnose.txt
           git add .n8n-diagnose.txt
 
-      # ✅ 커밋 (누락됐던 fi 추가 완료)
       - name: Commit if changes exist
         id: commit
         shell: bash
@@ -153,8 +173,6 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git remote set-url origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}"
 
-
-      # ✅ 커밋된 경우에만 push
       - name: Push branch
         if: steps.commit.outputs.did_commit == 'true'
         shell: bash
@@ -162,7 +180,6 @@ jobs:
           set -euo pipefail
           git push -u origin "${{ steps.mkbranch.outputs.branch }}"
 
-      # ✅ 커밋된 경우에만 PR 생성
       - name: Create Pull Request
         if: steps.commit.outputs.did_commit == 'true'
         env:
@@ -175,5 +192,3 @@ jobs:
             --base "${{ inputs.base_branch }}" \
             --title "${{ inputs.pr_title }}" \
             --body "Automated patch via workflow run ${{ github.run_id }}"
-
-
