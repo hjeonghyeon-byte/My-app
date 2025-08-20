@@ -105,6 +105,21 @@ jobs:
           echo "did_apply=$DID_APPLY" >> "$GITHUB_OUTPUT"
 
 
+      # ✅ (이동) 패치 적용 직후, 필요한 파일이 실제 생겼는지 점검
+      - name: Verify required files exist (only when patch applied)
+        if: steps.apply.outputs.did_apply == 'true'
+        shell: bash
+        run: |
+          set -euo pipefail
+          req=(apps/lotto/lotto.py tests/test_lotto.py requirements.txt)
+          for f in "${req[@]}"; do
+            if ! test -f "$f"; then
+              echo "::error ::Required file missing after apply: $f"
+              exit 1
+            fi
+          done
+
+
 
       # ✅ 변경 0건이어도 PR이 생기도록 최소 1개 변경 보장
       - name: Ensure at least one change
@@ -161,23 +176,4 @@ jobs:
             --title "${{ inputs.pr_title }}" \
             --body "Automated patch via workflow run ${{ github.run_id }}"
 
-      - name: Apply patch
-        shell: bash
-        run: |
-          set -e
-          git config core.autocrlf false
-          base64 -d patch.b64 | gunzip > patch.diff
-          git apply -p1 --whitespace=nowarn --check patch.diff
-          git apply -p1 --whitespace=nowarn patch.diff
-      
-      - name: Verify required files exist
-        shell: bash
-        run: |
-          set -e
-          req=(apps/lotto/lotto.py tests/test_lotto.py requirements.txt)
-          for f in "${req[@]}"; do
-            if ! git ls-files --error-unmatch "$f" >/dev/null 2>&1; then
-              echo "::error ::Required file missing after apply: $f"
-              exit 1
-            fi
-          done
+
