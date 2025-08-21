@@ -74,9 +74,9 @@ jobs:
         id: apply
         env:
           PATCH_B64:     ${{ env.PATCH_B64 }}
-          REQUIRED_FILES:${{ env.REQUIRED_FILES }}
+          REQUIRED_FILES: ${{ env.REQUIRED_FILES }}
           MUST_CREATE:   ${{ env.MUST_CREATE }}
-        shell: bash
+
         run: |
           set -eo pipefail
           DID_APPLY="false"
