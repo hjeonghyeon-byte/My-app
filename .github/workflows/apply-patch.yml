@@ -52,7 +52,7 @@ jobs:
           git switch -c "$BR"
           echo "branch=$BR" >> "$GITHUB_OUTPUT"
 
-      - name: Apply patch if provided (robust)
+      - name: Apply patch if provided
         id: apply
         env:
           PATCH_B64: ${{ inputs.patch_b64 }}
@@ -62,13 +62,14 @@ jobs:
         run: |
           set -eo pipefail
           DID_APPLY="false"
+
           if [ -n "${PATCH_B64:-}" ]; then
             echo "[info] patch_b64 length: $(printf '%s' "$PATCH_B64" | wc -c)"
             printf '%s' "$PATCH_B64" | tr -d '\r\n' | base64 -d > patch.diff 2> decode.err || true
             sed -i 's/\r$//' patch.diff || true
 
-            python - <<'PY'
-import json, os, sys
+            python3 - <<'PY'
+import json, os
 open('.rf.list','w').write('\n'.join(json.loads(os.environ.get('REQUIRED_FILES','[]'))))
 open('.mc.list','w').write('\n'.join(json.loads(os.environ.get('MUST_CREATE','[]'))))
 PY
