@@ -62,12 +62,9 @@ jobs:
         run: |
           set -eo pipefail
           DID_APPLY="false"
-
           if [ -n "${PATCH_B64:-}" ]; then
-            echo "[info] patch_b64 length: $(printf '%s' "$PATCH_B64" | wc -c)"
             printf '%s' "$PATCH_B64" | tr -d '\r\n' | base64 -d > patch.diff 2> decode.err || true
             sed -i 's/\r$//' patch.diff || true
-
             python3 - <<'PY'
 import json, os
 open('.rf.list','w').write('\n'.join(json.loads(os.environ.get('REQUIRED_FILES','[]'))))
@@ -75,68 +72,37 @@ open('.mc.list','w').write('\n'.join(json.loads(os.environ.get('MUST_CREATE','[]
 PY
             mapfile -t RF < .rf.list || true
             mapfile -t MC < .mc.list || true
-
-            if [ ${#RF[@]} -gt 0 ]; then
-              for f in "${RF[@]}"; do
-                grep -q -E "^(diff --git a/${f} b/${f}|\+\+\+ b/${f})$" patch.diff || echo "::warning ::Required file not present in diff (pre-apply): $f"
-              done
-            fi
-            if [ ${#MC[@]} -gt 0 ]; then
-              for f in "${MC[@]}"; do
-                (grep -q -E "^\+\+\+ b/${f}$" patch.diff && grep -q -E "^--- /dev/null$" patch.diff) || echo "::warning ::Must-create header not found (pre-apply): $f"
-              done
-            fi
-
-            echo "[preview top 20]"; head -n 20 patch.diff || true
-            echo "[preview bottom 20]"; tail -n 20 patch.diff || true
-
             for P in 0 1; do
               if git apply --check --whitespace=nowarn -p${P} patch.diff 2> apply_check.err; then
                 if git apply --index --whitespace=nowarn -p${P} patch.diff 2> apply.err; then
-                  DID_APPLY="true"
-                  echo "[info] git apply -p${P} succeeded"
-                  break
+                  DID_APPLY="true"; break
                 fi
               fi
             done
-
             if [ "$DID_APPLY" != "true" ] && command -v patch >/dev/null 2>&1; then
               for P in 0 1; do
                 if patch -p${P} -f -s < patch.diff; then
-                  git add -A
-                  DID_APPLY="true"
-                  echo "[info] patch -p${P} succeeded"
-                  break
+                  git add -A; DID_APPLY="true"; break
                 fi
               done
             fi
-
             if [ "$DID_APPLY" = "true" ]; then
-              echo "[git status --porcelain]"; git status --porcelain || true
-              echo "[git diff --cached --name-status]"; git diff --cached --name-status || true
               if [ ${#RF[@]} -gt 0 ]; then
                 for f in "${RF[@]}"; do
                   if ! test -f "$f"; then
-                    echo "::error ::Required file missing after apply: $f"
-                    exit 1
+                    echo "::error ::Required file missing after apply: $f"; exit 1
                   fi
                 done
               fi
             else
-              echo "::warning ::Patch application failed. Committing patch.diff and debug logs."
               mkdir -p .n8n-debug || true
-              [ -s decode.err ] && mv decode.err .n8n-debug/ || true
-              [ -s apply_check.err ] && mv apply_check.err .n8n-debug/ || true
-              [ -s apply.err ] && mv apply.err .n8n-debug/ || true
               git add patch.diff .n8n-debug || true
             fi
           fi
-
           echo "did_apply=$DID_APPLY" >> "$GITHUB_OUTPUT"
 
       - name: Ensure at least one change
         run: |
-          set -euo pipefail
           {
             echo "run_id=${{ github.run_id }}"
             echo "run_url=${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
@@ -152,7 +118,6 @@ PY
             git commit -m "${{ inputs.pr_title }}"
             echo "did_commit=true" >> "$GITHUB_OUTPUT"
           else
-            echo "No staged changes; skip commit."
             echo "did_commit=false" >> "$GITHUB_OUTPUT"
           fi
 
@@ -164,20 +129,15 @@ PY
 
       - name: Push branch
         if: steps.commit.outputs.did_commit == 'true'
-        run: |
-          set -euo pipefail
-          git push -u origin "${{ steps.mkbranch.outputs.branch }}"
+        run: git push -u origin "${{ steps.mkbranch.outputs.branch }}"
 
       - name: Create Pull Request
         if: steps.commit.outputs.did_commit == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set -euo pipefail
           gh pr create \
             --head "${{ steps.mkbranch.outputs.branch }}" \
             --base "${{ inputs.base_branch }}" \
             --title "${{ inputs.pr_title }}" \
             --body "Automated patch via workflow run ${{ github.run_id }}"
-
-
