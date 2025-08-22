@@ -1,4 +1,4 @@
-name: apply-patch
+﻿name: apply-patch
 
 on:
   workflow_dispatch:
@@ -179,3 +179,4 @@ PY
             --base "${{ inputs.base_branch }}" \
             --title "${{ inputs.pr_title }}" \
             --body "Automated patch via workflow run ${{ github.run_id }}"
+

@@ -7,3 +7,6 @@ dist/
 build/
 patch.diff
 .n8n-debug/
+.n8n-diagnose.txt
+.n8n-debug/
+patch.diff
