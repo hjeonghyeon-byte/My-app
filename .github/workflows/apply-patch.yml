@@ -121,3 +121,8 @@ jobs:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh pr create --head "${{ steps.mk.outputs.branch }}" --base "${{ inputs.base_branch }}" --title "${{ inputs.pr_title }}" --body "Automated patch via workflow run ${{ github.run_id }}"
+
+      - name: Debug patch
+        run: |
+          echo "patch_b64 length: ${#PATCH_B64}"
+          echo "$PATCH_B64" | base64 -d | head -10
