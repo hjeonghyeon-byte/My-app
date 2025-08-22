@@ -45,15 +45,15 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       - name: Create work branch
-        id: mkbranch
+        id: mk
         run: |
           set -euo pipefail
           BR="auto/patch-${{ github.run_id }}"
           git switch -c "$BR"
           echo "branch=$BR" >> "$GITHUB_OUTPUT"
 
-      - name: Apply patch if provided
-        id: apply
+      - name: Apply patch (if provided)
+        if: ${{ inputs.patch_b64 != '' }}
         env:
           PATCH_B64: ${{ inputs.patch_b64 }}
           REQUIRED_FILES: ${{ inputs.required_files }}
@@ -61,45 +61,33 @@ jobs:
         shell: bash
         run: |
           set -eo pipefail
-          DID_APPLY="false"
-          if [ -n "${PATCH_B64:-}" ]; then
-            printf '%s' "$PATCH_B64" | tr -d '\r\n' | base64 -d > patch.diff 2> decode.err || true
-            sed -i 's/\r$//' patch.diff || true
-            python3 - <<'PY'
-import json, os
-open('.rf.list','w').write('\n'.join(json.loads(os.environ.get('REQUIRED_FILES','[]'))))
-open('.mc.list','w').write('\n'.join(json.loads(os.environ.get('MUST_CREATE','[]'))))
-PY
-            mapfile -t RF < .rf.list || true
-            mapfile -t MC < .mc.list || true
+          printf '%s' "$PATCH_B64" | tr -d '\r\n' | base64 -d > patch.diff 2> decode.err || true
+          sed -i 's/\r$//' patch.diff || true
+          DID_APPLY=false
+          for P in 0 1; do
+            if git apply --check --whitespace=nowarn -p${P} patch.diff 2> apply_check.err; then
+              if git apply --index --whitespace=nowarn -p${P} patch.diff 2> apply.err; then
+                DID_APPLY=true; break
+              fi
+            fi
+          done
+          if [ "$DID_APPLY" != "true" ] && command -v patch >/dev/null 2>&1; then
             for P in 0 1; do
-              if git apply --check --whitespace=nowarn -p${P} patch.diff 2> apply_check.err; then
-                if git apply --index --whitespace=nowarn -p${P} patch.diff 2> apply.err; then
-                  DID_APPLY="true"; break
-                fi
+              if patch -p${P} -f -s < patch.diff; then
+                git add -A; DID_APPLY=true; break
               fi
             done
-            if [ "$DID_APPLY" != "true" ] && command -v patch >/dev/null 2>&1; then
-              for P in 0 1; do
-                if patch -p${P} -f -s < patch.diff; then
-                  git add -A; DID_APPLY="true"; break
-                fi
-              done
-            fi
-            if [ "$DID_APPLY" = "true" ]; then
-              if [ ${#RF[@]} -gt 0 ]; then
-                for f in "${RF[@]}"; do
-                  if ! test -f "$f"; then
-                    echo "::error ::Required file missing after apply: $f"; exit 1
-                  fi
-                done
-              fi
-            else
-              mkdir -p .n8n-debug || true
-              git add patch.diff .n8n-debug || true
-            fi
           fi
-          echo "did_apply=$DID_APPLY" >> "$GITHUB_OUTPUT"
+          if [ "$DID_APPLY" = "true" ] && [ -s patch.diff ] && [ -n "${REQUIRED_FILES:-}" ] && [ "${REQUIRED_FILES}" != "[]" ]; then
+            python3 - <<'EOF'
+          import json, os, sys
+          rf = json.loads(os.environ.get("REQUIRED_FILES","[]"))
+          missing = [f for f in rf if f and not os.path.isfile(f)]
+          if missing:
+            print("::error ::Required file(s) missing after apply:", ", ".join(missing))
+            sys.exit(1)
+          EOF
+          fi
 
       - name: Ensure at least one change
         run: |
@@ -111,33 +99,25 @@ PY
           git add .n8n-diagnose.txt
 
       - name: Commit if changes exist
-        id: commit
+        id: c
         run: |
           set -euo pipefail
           if ! git diff --cached --quiet; then
             git commit -m "${{ inputs.pr_title }}"
-            echo "did_commit=true" >> "$GITHUB_OUTPUT"
+            echo "did=true" >> "$GITHUB_OUTPUT"
           else
-            echo "did_commit=false" >> "$GITHUB_OUTPUT"
+            echo "did=false" >> "$GITHUB_OUTPUT"
           fi
 
-      - name: Ensure git auth uses token
+      - name: Push
+        if: steps.c.outputs.did == 'true'
         run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git remote set-url origin "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}"
-
-      - name: Push branch
-        if: steps.commit.outputs.did_commit == 'true'
-        run: git push -u origin "${{ steps.mkbranch.outputs.branch }}"
+          git push -u origin "${{ steps.mk.outputs.branch }}"
 
       - name: Create Pull Request
-        if: steps.commit.outputs.did_commit == 'true'
+        if: steps.c.outputs.did == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh pr create \
-            --head "${{ steps.mkbranch.outputs.branch }}" \
-            --base "${{ inputs.base_branch }}" \
-            --title "${{ inputs.pr_title }}" \
-            --body "Automated patch via workflow run ${{ github.run_id }}"
+          gh pr create --head "${{ steps.mk.outputs.branch }}" --base "${{ inputs.base_branch }}" --title "${{ inputs.pr_title }}" --body "Automated patch via workflow run ${{ github.run_id }}"
